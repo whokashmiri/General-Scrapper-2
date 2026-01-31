@@ -4,15 +4,14 @@ import { getDb } from "./mongo.js";
  * Save ad ONLY when FOUND.
  * - Uses _id = postId
  * - Stores gql snapshot (posts/comments etc.) if provided
+ * ✅ RULE: If item is null => DO NOT INSERT/UPDATE in DB
  */
-
 export async function saveAdIfNew(ad) {
   if (!ad || ad.status !== "FOUND") return { inserted: false };
 
-  const db = await getDb();
-  const col = db.collection("harajScrape");
-  const now = new Date();
-
+  // -------------------------
+  // Extract + validate postId
+  // -------------------------
   const postId = String(ad.postId || ad._id || "").trim();
   if (!postId) return { inserted: false };
 
@@ -24,40 +23,44 @@ export async function saveAdIfNew(ad) {
     ad?.gql?.posts?.json?.data?.post?.items?.[0] ??
     null;
 
+  // ✅ HARD RULE: if item is null => DO NOT SAVE ANYTHING
+  if (!gqlPostsItem) {
+    console.warn(`[SKIP_DB] item=null, not saving postId=${postId}`);
+    return { inserted: false, skipped: "ITEM_NULL" };
+  }
+
   const formattedPrice = gqlPostsItem?.price?.formattedPrice ?? null;
   const numericPrice =
     formattedPrice != null
       ? Number(String(formattedPrice).replace(/[^\d]/g, "")) || null
       : null;
 
-  const item = gqlPostsItem
-    ? {
-        id: gqlPostsItem.id ?? null,
-        title: gqlPostsItem.title ?? null,
-        postDate: gqlPostsItem.postDate ?? null,     // unix seconds
-        updateDate: gqlPostsItem.updateDate ?? null, // unix seconds
-        authorUsername: gqlPostsItem.authorUsername ?? null,
-        authorId: gqlPostsItem.authorId ?? null,
-        URL: gqlPostsItem.URL ?? null,
-        bodyTEXT: gqlPostsItem.bodyTEXT ?? null,
-        city: gqlPostsItem.city ?? null,
-        geoCity: gqlPostsItem.geoCity ?? null,
-        geoNeighborhood: gqlPostsItem.geoNeighborhood ?? null,
-        tags: Array.isArray(gqlPostsItem.tags) ? gqlPostsItem.tags : [],
-        imagesList: Array.isArray(gqlPostsItem.imagesList) ? gqlPostsItem.imagesList : [],
-        hasImage: gqlPostsItem.hasImage ?? null,
-        hasVideo: gqlPostsItem.hasVideo ?? null,
-        commentEnabled: gqlPostsItem.commentEnabled ?? null,
-        commentStatus: gqlPostsItem.commentStatus ?? null,
-        commentCount: gqlPostsItem.commentCount ?? null,
-        status: gqlPostsItem.status ?? null,
-        postType: gqlPostsItem.postType ?? null,
-        price: {
-          formattedPrice,
-          numeric: numericPrice,
-        },
-      }
-    : null;
+  const item = {
+    id: gqlPostsItem.id ?? null,
+    title: gqlPostsItem.title ?? null,
+    postDate: gqlPostsItem.postDate ?? null,     // unix seconds
+    updateDate: gqlPostsItem.updateDate ?? null, // unix seconds
+    authorUsername: gqlPostsItem.authorUsername ?? null,
+    authorId: gqlPostsItem.authorId ?? null,
+    URL: gqlPostsItem.URL ?? null,
+    bodyTEXT: gqlPostsItem.bodyTEXT ?? null,
+    city: gqlPostsItem.city ?? null,
+    geoCity: gqlPostsItem.geoCity ?? null,
+    geoNeighborhood: gqlPostsItem.geoNeighborhood ?? null,
+    tags: Array.isArray(gqlPostsItem.tags) ? gqlPostsItem.tags : [],
+    imagesList: Array.isArray(gqlPostsItem.imagesList) ? gqlPostsItem.imagesList : [],
+    hasImage: gqlPostsItem.hasImage ?? null,
+    hasVideo: gqlPostsItem.hasVideo ?? null,
+    commentEnabled: gqlPostsItem.commentEnabled ?? null,
+    commentStatus: gqlPostsItem.commentStatus ?? null,
+    commentCount: gqlPostsItem.commentCount ?? null,
+    status: gqlPostsItem.status ?? null,
+    postType: gqlPostsItem.postType ?? null,
+    price: {
+      formattedPrice,
+      numeric: numericPrice,
+    },
+  };
 
   // -------------------------
   // Normalize COMMENTS
@@ -65,7 +68,7 @@ export async function saveAdIfNew(ad) {
   const gqlCommentsItems =
     ad?.gql?.comments?.json?.data?.comments?.items ??
     ad?.commentsGql?.data?.comments?.items ??
-    [];
+    null;
 
   const comments = Array.isArray(gqlCommentsItems)
     ? gqlCommentsItems.map((c) => ({
@@ -74,7 +77,7 @@ export async function saveAdIfNew(ad) {
         authorId: c?.authorId ?? null,
         authorLevel: c?.authorLevel ?? null,
         body: c?.body ?? null,
-        status: c?.status ?? null, // 1 visible, 0 hidden (based on your sample)
+        status: c?.status ?? null, // 1 visible, 0 hidden
         deleteReason: c?.deleteReason ?? null,
         seqId: c?.seqId ?? null,
         date: c?.date ?? null, // unix seconds
@@ -84,12 +87,18 @@ export async function saveAdIfNew(ad) {
       }))
     : [];
 
-  // useful: visible comments only
   const visibleComments = comments.filter((c) => c?.status === 1);
+
+  // ✅ only set commentsLastFetchedAt when comments payload actually exists in gql
+  const hasCommentsPayload = gqlCommentsItems !== null && gqlCommentsItems !== undefined;
 
   // -------------------------
   // DB upsert
   // -------------------------
+  const db = await getDb();
+  const col = db.collection("harajScrape");
+  const now = new Date();
+
   const res = await col.updateOne(
     { _id: postId },
     {
@@ -110,15 +119,12 @@ export async function saveAdIfNew(ad) {
         item,
 
         // ✅ normalized comments for API
-        comments,                 // all comments (including hidden)
+        comments,
         visibleCommentsCount: visibleComments.length,
         commentsCount: comments.length,
 
-        // set when we have comments payload
-        commentsLastFetchedAt:
-          (Array.isArray(gqlCommentsItems) && gqlCommentsItems.length >= 0)
-            ? now
-            : null,
+        // set only if comments payload exists
+        commentsLastFetchedAt: hasCommentsPayload ? now : null,
 
         // convenience mirrors for fast query/indexing
         title: item?.title ?? null,
@@ -155,10 +161,10 @@ export async function updateComments(postId, commentsGql) {
     authorId: c?.authorId ?? null,
     authorLevel: c?.authorLevel ?? null,
     body: c?.body ?? null,
-    status: c?.status ?? null, // 1 visible, 0 hidden (based on sample)
+    status: c?.status ?? null,
     deleteReason: c?.deleteReason ?? null,
     seqId: c?.seqId ?? null,
-    date: c?.date ?? null, // unix seconds
+    date: c?.date ?? null,
     isReply: c?.isReply ?? false,
     replyToCommentId: c?.replyToCommentId ?? 0,
     mention: c?.mention ?? null,
@@ -184,15 +190,12 @@ export async function updateComments(postId, commentsGql) {
   );
 }
 
-
 /**
  * Find ads eligible for comment refresh:
  * - Ad is older than cutoff (firstSeenAt <= now - olderThanHours)
  * - AND either:
  *   - never refreshed
  *   - or refreshed long ago (stale)
- *
- * This prevents refreshing the same ads every run unnecessarily.
  */
 export async function findAdsForCommentRefresh({
   olderThanHours = 24,
@@ -206,13 +209,15 @@ export async function findAdsForCommentRefresh({
     $or: [
       { commentsLastFetchedAt: { $exists: false } },
       { commentsLastFetchedAt: null },
-      { commentsLastFetchedAt: { $lte: cutoff } }, // stale refresh (>= 24h ago)
+      { commentsLastFetchedAt: { $lte: cutoff } },
     ],
   };
 
   return db
     .collection("harajScrape")
-    .find(q, { projection: { _id: 1, postId: 1, url: 1, firstSeenAt: 1, commentsLastFetchedAt: 1 } })
+    .find(q, {
+      projection: { _id: 1, postId: 1, url: 1, firstSeenAt: 1, commentsLastFetchedAt: 1 },
+    })
     .sort({ commentsLastFetchedAt: 1, firstSeenAt: 1 })
     .limit(limit)
     .toArray();
