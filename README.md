@@ -1,31 +1,45 @@
-# Haraj Scraper (Node + Playwright)
+# Haraj nodriver scraper
 
-What it does:
-- Logs into haraj.com.sa using username/password from `.env`.
-- Opens **two tabs**:
-  - **New ads**: increments from `START_ID` and **never stops**.
-  - **Old ads**: decrements from `START_ID-1` and stops only if it hits **200 consecutive** removed/missing ads.
-- Detects removed/missing ads by the Arabic phrase:
-  - `العرض محذوف او قديم.شاهد العروض المشابهة في الأسفل`
-  - These are **not stored** in DB.
-- For every FOUND ad:
-  - Clicks the contact button (`data-testid="post-contact"`) and extracts the seller phone number from `a[data-testid="contact_mobile"]`.
-  - Captures GraphQL JSON responses from:
-    - `https://graphql.haraj.com.sa/?queryName=posts...`
-    - `https://graphql.haraj.com.sa/?queryName=comments...`
-- Comments refresh worker updates comments for ads older than 24h.
-- Sends a daily email report with how many ads were added in the last 24 hours.
+Python nodriver scraper for Haraj posts, seller contact phone, comments capture, session reuse, and MongoDB persistence.
 
 ## Setup
 
 ```bash
-npm install
-npx playwright install chromium
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -r requirements.txt
 cp .env.example .env
-# edit .env
-npm start
 ```
 
+Edit `.env` and set `HARAJ_USERNAME`, `HARAJ_PASSWORD`, `MONGODB_URI`, `STARTID`, `CONCURRENCY_UP`, and `CONCURRENCY_DOWN`.
+
+Run:
+
+```bash
+python -m haraj_scraper.main
+```
+
+The first run opens Chrome, logs in, and saves cookies/profile in `SESSION_COOKIES_FILE` and `USER_DATA_DIR`. Later runs reuse the same session. If Haraj asks for OTP/CAPTCHA/Nafath, complete it manually in the opened browser, then rerun.
+
+## ID behavior
+
+With:
+
+```env
+STARTID=36
+CONCURRENCY_UP=3
+CONCURRENCY_DOWN=2
+```
+
+The first batch scrapes IDs: `36, 37, 38, 35, 34`.
+
+Set `MAX_IDS_PER_RUN` to keep walking outward from `STARTID`; set `0` for a single batch.
+
+## Comment refresh
+
+Set `ENABLE_COMMENT_REFRESH=true` to keep a background task running. It checks posts whose comments are older than `COMMENT_REFRESH_OLDER_THAN_HOURS` and refreshes them every `COMMENT_REFRESH_INTERVAL_HOURS`.
+
 ## Notes
-- This project uses **UI navigation** + **GraphQL response capture**. It does not need you to hardcode GraphQL payloads.
-- If Haraj adds OTP/captcha/nafath, login may need extra steps.
+
+Use your own account, respect Haraj terms and rate limits, and do not use this to bypass OTP, CAPTCHA, Nafath, or access controls.
