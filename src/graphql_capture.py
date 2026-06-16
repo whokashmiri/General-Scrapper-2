@@ -91,13 +91,13 @@ class GraphqlCapture:
                     "post_data": post_data,
                 }
 
-            print(f"\n[GQL REQUEST] qn={qn}")
+            # print(f"\n[GQL REQUEST] qn={qn}")
 
             if qn == "comments":
                 print("[COMMENTS REQUEST URL]")
-                print(url)
-                print("[COMMENTS REQUEST BODY]")
-                print(str(post_data)[:3000])
+                # print(url)
+                # print("[COMMENTS REQUEST BODY]")
+                # print(str(post_data)[:3000])
 
         except Exception as exc:
             print(f"[GQL REQUEST ERROR] {exc!r}")
@@ -114,7 +114,7 @@ class GraphqlCapture:
             if qn in self.payloads:
                 return
 
-            print(f"\n[GQL RESPONSE] qn={qn} status={event.response.status}")
+            # print(f"\n[GQL RESPONSE] qn={qn} status={event.response.status}")
 
             text = None
 
@@ -135,7 +135,7 @@ class GraphqlCapture:
                     print(str(text)[:5000])
 
             except Exception as exc:
-                print(f"[GQL CDP BODY FAILED] qn={qn}: {exc!r}")
+                # print(f"[GQL CDP BODY FAILED] qn={qn}: {exc!r}")
 
                 self.replaying.add(qn)
 
@@ -144,7 +144,7 @@ class GraphqlCapture:
 
                     if qn == "comments":
                         print("[COMMENTS RESPONSE BODY FROM REPLAY]")
-                        print(str(text)[:5000])
+                        # print(str(text)[:5000])
 
                 finally:
                     self.replaying.discard(qn)
@@ -164,9 +164,9 @@ class GraphqlCapture:
                      .get("comments") or {})
                     .get("items") or []
                 )
-                print(f"[COMMENTS PARSED] items={len(items)}")
-                print("[COMMENTS PARSED SAMPLE]")
-                print(str(data)[:3000])
+                # print(f"[COMMENTS PARSED] items={len(items)}")
+                # print("[COMMENTS PARSED SAMPLE]")
+                # print(str(data)[:3000])
 
             self.payloads[qn] = {
                 "json": data,

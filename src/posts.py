@@ -9,7 +9,7 @@ from typing import Any
 
 from .comments import is_not_found, scroll_comments_fallback
 from .config import settings
-# from .contact import fetch_seller_phone
+from .contact import fetch_seller_phone
 from .db import save_ad_if_new
 from .graphql_capture import attach_graphql_capture
 from .urls import post_url
@@ -260,15 +260,18 @@ async def scrape_one(browser, post_id: int | str, sem: asyncio.Semaphore) -> Non
 
             comments_json = gql_payloads.get("comments")
             user_json = gql_payloads.get("user")
-            user_item = (
-                ((user_json or {}).get("data") or {})
-                .get("user")
-            )
+
+            try:
+                phone = await fetch_seller_phone(tab)
+            except Exception as exc:
+                print(f"[CONTACT] Error {haraj_url_id}: {exc!r}")
+                phone = None
+
             contact = {
-                "id": user_item.get("id") if isinstance(user_item, dict) else None,
-                "username": user_item.get("username") if isinstance(user_item, dict) else None,
-                "mobile": user_item.get("mobile") if isinstance(user_item, dict) else None,
-                "email": user_item.get("email") if isinstance(user_item, dict) else None,
+                
+                "username": post.get("authorUsername"),
+                "mobile": phone,
+                
             }
 
             comments_block: dict[str, Any] = {}
