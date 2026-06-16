@@ -1,3 +1,4 @@
+# src/graphql_capture.py
 from __future__ import annotations
 
 import asyncio
@@ -67,19 +68,36 @@ class GraphqlCapture:
 
             if qn not in self.include_query_names:
                 return
-            
 
-            self.requests[qn] = {
-                "url": url,
-                "post_data": getattr(event.request, "post_data", None),
-            }
+            post_data = getattr(event.request, "post_data", None)
 
-            if qn == "posts":
-                print("\n[POSTS REQUEST]")
-                # print(f"method={event.request.method}")
-                # print(f"url={url}")
-                # print("[POSTS REQUEST BODY]")
-                # print(str(self.requests[qn]["post_data"])[:2000])
+            if not post_data:
+                try:
+                    req_body = await self.tab.send(
+                        uc.cdp.network.get_request_post_data(event.request_id)
+                    )
+                    post_data = getattr(req_body, "post_data", None)
+                except Exception as exc:
+                    print(f"[GQL POST DATA FAILED] qn={qn}: {exc!r}")
+                    post_data = None
+
+            existing = self.requests.get(qn)
+
+            if existing and existing.get("post_data") and not post_data:
+                print(f"[GQL REQUEST KEEP OLD BODY] qn={qn}")
+            else:
+                self.requests[qn] = {
+                    "url": url,
+                    "post_data": post_data,
+                }
+
+            print(f"\n[GQL REQUEST] qn={qn}")
+
+            if qn == "comments":
+                print("[COMMENTS REQUEST URL]")
+                print(url)
+                print("[COMMENTS REQUEST BODY]")
+                print(str(post_data)[:3000])
 
         except Exception as exc:
             print(f"[GQL REQUEST ERROR] {exc!r}")
@@ -95,9 +113,6 @@ class GraphqlCapture:
                 return
             if qn in self.payloads:
                 return
-
-            
-           
 
             print(f"\n[GQL RESPONSE] qn={qn} status={event.response.status}")
 
@@ -115,12 +130,22 @@ class GraphqlCapture:
 
                 print(f"[GQL BODY FROM CDP] qn={qn} len={len(text)}")
 
+                if qn == "comments":
+                    print("[COMMENTS RESPONSE BODY FROM CDP]")
+                    print(str(text)[:5000])
+
             except Exception as exc:
-                # print(f"[GQL CDP BODY FAILED] qn={qn}: {exc!r}")
+                print(f"[GQL CDP BODY FAILED] qn={qn}: {exc!r}")
+
                 self.replaying.add(qn)
-            
+
                 try:
                     text = await self._replay_request(qn)
+
+                    if qn == "comments":
+                        print("[COMMENTS RESPONSE BODY FROM REPLAY]")
+                        print(str(text)[:5000])
+
                 finally:
                     self.replaying.discard(qn)
 
@@ -128,7 +153,20 @@ class GraphqlCapture:
                 print(f"[GQL EMPTY BODY] qn={qn}")
                 return
 
+            if qn == "comments":
+                print(f"[COMMENTS TEXT LEN] {len(text)}")
+
             data = json.loads(text)
+
+            if qn == "comments":
+                items = (
+                    ((data.get("data") or {})
+                     .get("comments") or {})
+                    .get("items") or []
+                )
+                print(f"[COMMENTS PARSED] items={len(items)}")
+                print("[COMMENTS PARSED SAMPLE]")
+                print(str(data)[:3000])
 
             self.payloads[qn] = {
                 "json": data,
@@ -139,7 +177,11 @@ class GraphqlCapture:
                 self.events[qn].set()
 
             if qn == "posts":
-                item = (((data.get("data") or {}).get("posts") or {}).get("items") or [None])[0]
+                item = (
+                    ((data.get("data") or {})
+                     .get("posts") or {})
+                    .get("items") or [None]
+                )[0]
                 print(f"[POSTS CAPTURED] id={item.get('id') if item else None}")
 
             print(f"[GQL CAPTURED] qn={qn}")
@@ -152,9 +194,13 @@ class GraphqlCapture:
         url = req.get("url")
         post_data = req.get("post_data")
 
-        if not url or not post_data:
-            print(f"[GQL REPLAY SKIP] missing request qn={qn}")
+        if not url:
+            print(f"[GQL REPLAY SKIP] missing url qn={qn}")
             return None
+
+        if not post_data:
+            print(f"[GQL REPLAY WARNING] missing body qn={qn}, using empty JSON")
+            post_data = "{}"
 
         script = """
         async (url, body) => {
@@ -192,7 +238,11 @@ class GraphqlCapture:
 
         result = json.loads(raw)
 
-        print(f"[GQL REPLAY] qn={qn} status={result.get('status')} ok={result.get('ok')}")
+        print(
+            f"[GQL REPLAY] qn={qn} "
+            f"status={result.get('status')} "
+            f"ok={result.get('ok')}"
+        )
 
         if not result.get("ok"):
             print("[GQL REPLAY ERROR TEXT]")

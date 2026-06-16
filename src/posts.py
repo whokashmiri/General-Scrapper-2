@@ -1,3 +1,5 @@
+
+# src/posts.py
 from __future__ import annotations
 import nodriver as uc
 import asyncio
@@ -5,15 +7,25 @@ import random
 from typing import Any
 
 
-from .comments import fetch_comments_in_page, is_not_found
+from .comments import is_not_found, scroll_comments_fallback
 from .config import settings
-from .contact import fetch_seller_phone
+# from .contact import fetch_seller_phone
 from .db import save_ad_if_new
-from .extract import extract_posts_from_posts_response
 from .graphql_capture import attach_graphql_capture
 from .urls import post_url
 from .browser import eval_js
 
+
+async def get_captured_gql_from_window(tab, query_name: str) -> dict[str, Any] | None:
+    return await eval_js(
+        tab,
+        """(queryName) => {
+            const box = window.__HARAJ_GQL__ || {};
+            const item = box[queryName];
+            return item && item.json ? item.json : null;
+        }""",
+        query_name,
+    )
 
 def ids_for_batch(start_id: int, up: int, down: int, batch_no: int) -> list[int]:
     ids: list[int] = []
@@ -50,6 +62,54 @@ def ids_for_run(start_id: int, up: int, down: int, max_ids: int = 0) -> list[int
             return ids
 
         batch_no += 1
+
+
+async def fetch_comments_direct(tab) -> dict[str, Any] | None:
+    script = """
+    async () => {
+      const urls = performance
+        .getEntriesByType("resource")
+        .map(e => e.name)
+        .filter(u => u.includes("graphql.haraj.com.sa") && u.includes("queryName=comments"));
+
+      const url = urls[urls.length - 1];
+      if (!url) return null;
+
+      const res = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "accept": "*/*",
+          "content-type": "application/json",
+          "referer": location.href
+        },
+        body: "{}"
+      });
+
+      const text = await res.text();
+
+      return JSON.stringify({
+        ok: res.ok,
+        status: res.status,
+        text
+      });
+    }
+    """
+
+    raw = await tab.evaluate(f"({script})()", await_promise=True)
+
+    if not raw:
+        return None
+
+    import json
+    result = json.loads(raw)
+
+    if not result.get("ok"):
+        print(f"[COMMENTS DIRECT] failed status={result.get('status')}")
+        print(str(result.get("text"))[:500])
+        return None
+
+    return json.loads(result.get("text") or "{}")
 
 
 
@@ -128,9 +188,11 @@ async def install_fetch_capture(tab):
     )
 
 async def fetch_post_graphql_in_page(tab, post_id: int | str) -> dict[str, Any] | None:
-    post_id = str(post_id)
+    post_id = str(post_id).strip()
 
-    capture = attach_graphql_capture(tab, ["posts"])
+    await install_fetch_capture(tab)
+
+    capture = attach_graphql_capture(tab, ["posts", "user", "comments"])
     await capture.start()
     capture.clear()
 
@@ -138,11 +200,26 @@ async def fetch_post_graphql_in_page(tab, post_id: int | str) -> dict[str, Any] 
     await tab.get(post_url(post_id))
 
     ok = await capture.wait_for(["posts"], settings.response_timeout_ms)
-
     if not ok:
         return None
 
-    return capture.get_json("posts")
+    comments_json = capture.get_json("comments")
+    
+    if comments_json is None and settings.comment_refresh_scroll_fallback:
+        await scroll_comments_fallback(tab)
+        await capture.wait_for(["comments"], 10_000)
+        comments_json = capture.get_json("comments")
+
+    if comments_json is None:
+        comments_json = await get_captured_gql_from_window(tab, "comments")
+    if comments_json is None:
+        comments_json = await fetch_comments_direct(tab)
+
+    return {
+        "posts": capture.get_json("posts"),
+        "user": capture.get_json("user"),
+        "comments": comments_json,
+    }
 
 
 async def scrape_one(browser, post_id: int | str, sem: asyncio.Semaphore) -> None:
@@ -153,13 +230,17 @@ async def scrape_one(browser, post_id: int | str, sem: asyncio.Semaphore) -> Non
         try:
             print(f"[SCRAPE] Open {post_url(haraj_url_id)}")
 
-            # 1) Capture posts GraphQL only
-            posts_json = await fetch_post_graphql_in_page(tab, haraj_url_id)
+            gql_payloads = await fetch_post_graphql_in_page(tab, haraj_url_id)
 
             if await is_not_found(tab):
                 print(f"[SCRAPE] {haraj_url_id} not found")
                 return
 
+            if not isinstance(gql_payloads, dict):
+                print(f"[SCRAPE] {haraj_url_id} no posts GraphQL")
+                return
+
+            posts_json = gql_payloads.get("posts")
             if not isinstance(posts_json, dict):
                 print(f"[SCRAPE] {haraj_url_id} no posts GraphQL")
                 return
@@ -177,48 +258,46 @@ async def scrape_one(browser, post_id: int | str, sem: asyncio.Semaphore) -> Non
             post = items[0]
             real_post_id = str(post.get("id") or haraj_url_id).strip()
 
-            # 2) Contact may require UI click, but saved data is still ad + GraphQL
-            try:
-                phone = await fetch_seller_phone(tab)
-            except Exception as exc:
-                print(f"[CONTACT] Error {haraj_url_id}: {exc!r}")
-                phone = None
+            comments_json = gql_payloads.get("comments")
+            user_json = gql_payloads.get("user")
+            user_item = (
+                ((user_json or {}).get("data") or {})
+                .get("user")
+            )
+            contact = {
+                "id": user_item.get("id") if isinstance(user_item, dict) else None,
+                "username": user_item.get("username") if isinstance(user_item, dict) else None,
+                "mobile": user_item.get("mobile") if isinstance(user_item, dict) else None,
+                "email": user_item.get("email") if isinstance(user_item, dict) else None,
+            }
 
-            # 3) Capture comments GraphQL only
-            try:
-                comments_result = await fetch_comments_in_page(tab, haraj_url_id)
-            except Exception as exc:
-                print(f"[COMMENTS] Error {haraj_url_id}: {exc!r}")
-                comments_result = None
-
-            if not isinstance(comments_result, dict):
-                comments_result = {}
-
-            comments_raw = None
-            if comments_result.get("status") == "FOUND":
-                raw = comments_result.get("raw")
-                if isinstance(raw, dict):
-                    comments_raw = raw
-
-            comments_block = {}
-            if comments_raw:
+            comments_block: dict[str, Any] = {}
+            if isinstance(comments_json, dict):
                 comments_block = {
-                    "json": comments_raw,
+                    "json": comments_json,
                     "url": "captured_from_browser",
                 }
 
-            # 4) Save one MongoDB document, posts + comments together
+            user_block: dict[str, Any] = {}
+            if isinstance(user_json, dict):
+                user_block = {
+                    "json": user_json,
+                    "url": "captured_from_browser",
+                }
+
+            # 4) Save one MongoDB document, posts + user + comments together
             ad = {
                 "status": "FOUND",
                 "postId": real_post_id,
                 "harajUrlId": haraj_url_id,
                 "url": post_url(haraj_url_id),
-                "phone": phone,
+                "contact": contact,
                 "gql": {
                     "posts": {
                         "json": posts_json,
                         "url": "captured_from_browser",
                     },
+                    "user": user_block,
                     "comments": comments_block,
                 },
             }
@@ -226,14 +305,15 @@ async def scrape_one(browser, post_id: int | str, sem: asyncio.Semaphore) -> Non
             result = await save_ad_if_new(ad)
 
             comments_count = len(
-                (((comments_raw or {}).get("data") or {})
+                (((comments_json or {}).get("data") or {})
                  .get("comments") or {})
                 .get("items") or []
             )
 
             print(
                 f"[SCRAPE] Saved urlId={haraj_url_id} realId={real_post_id} "
-                f"inserted={result.get('inserted')} phone={phone} "
+                f"inserted={result.get('inserted')} "
+                f"contactMobile={contact.get('mobile')} "
                 f"comments={comments_count}"
             )
 

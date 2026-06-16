@@ -1,3 +1,4 @@
+# src/db.py
 from __future__ import annotations
 
 from datetime import datetime, timedelta, UTC
@@ -21,6 +22,22 @@ def get_client() -> AsyncIOMotorClient:
 def get_db():
     return get_client()[settings.mongodb_db]
 
+
+def normalize_contact(contact: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(contact, dict):
+        return {
+            "id": None,
+            "username": None,
+            "mobile": None,
+            "email": None,
+        }
+
+    return {
+        "id": contact.get("id"),
+        "username": contact.get("username"),
+        "mobile": contact.get("mobile"),
+        "email": contact.get("email"),
+    }
 
 def normalize_price(formatted_price):
     if formatted_price is None:
@@ -54,41 +71,33 @@ def extract_post_item(ad: dict[str, Any]) -> dict[str, Any] | None:
     return item
 
 
+def _extract_comments_items_from_payload(payload: dict[str, Any] | None):
+    if not isinstance(payload, dict):
+        return None
+
+    data = payload.get("data") or {}
+    for key in ("comments", "postComments"):
+        items = (data.get(key) or {}).get("items")
+        if isinstance(items, list):
+            return items
+    return None
+
+
 def extract_comments_items_from_ad(ad: dict[str, Any]):
     gql = ad.get("gql") or {}
 
     comments_block = gql.get("comments") or {}
-
-    items = (
-        comments_block
-        .get("json", {})
-        .get("data", {})
-        .get("comments", {})
-        .get("items")
-    )
-
+    items = _extract_comments_items_from_payload(comments_block.get("json"))
     if items is not None:
         return items
 
     comments_gql = ad.get("commentsGql") or {}
+    items = _extract_comments_items_from_payload(comments_gql)
+    return items or []
 
-    return (
-        comments_gql
-        .get("data", {})
-        .get("comments", {})
-        .get("items")
-    )
 
 def extract_comments_items_from_gql(comments_gql: dict[str, Any] | None):
-    if not comments_gql:
-        return []
-
-    items = (
-        comments_gql.get("data", {})
-        .get("comments", {})
-        .get("items")
-    )
-
+    items = _extract_comments_items_from_payload(comments_gql)
     return items if isinstance(items, list) else []
 
 
@@ -155,6 +164,8 @@ async def save_ad_if_new(ad: dict[str, Any]) -> dict[str, Any]:
     post_id = str(ad.get("postId") or ad.get("_id") or "").strip()
     if not post_id:
         return {"inserted": False}
+    
+    contact = normalize_contact(ad.get("contact"))
 
     gql_item = extract_post_item(ad)
 
@@ -185,7 +196,8 @@ async def save_ad_if_new(ad: dict[str, Any]) -> dict[str, Any]:
                 "lastSeenAt": now,
                 "url": ad.get("url") or f"https://haraj.com.sa/{post_id}",
                 "harajUrlId": ad.get("harajUrlId"),
-                "phone": ad.get("phone"),
+                "contact": contact,
+                "phone": contact.get("mobile"),
 
                 "gql": ad.get("gql"),
 
