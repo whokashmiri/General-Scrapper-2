@@ -203,11 +203,19 @@ async def fetch_post_graphql_in_page(tab, post_id: int | str) -> dict[str, Any] 
     if not ok:
         return None
 
+    posts_json = capture.get_json("posts")
+    items = (
+        (((posts_json or {}).get("data") or {}).get("posts") or {}).get("items") or []
+    )
+    if not items or items[0] is None:
+        # Deleted / empty post: no point waiting for comments.
+        return {"posts": posts_json, "user": None, "comments": None}
+
     comments_json = capture.get_json("comments")
-    
+
     if comments_json is None and settings.comment_refresh_scroll_fallback:
         await scroll_comments_fallback(tab)
-        await capture.wait_for(["comments"], 10_000)
+        await capture.wait_for(["comments"], settings.comments_wait_ms)
         comments_json = capture.get_json("comments")
 
     if comments_json is None:
@@ -344,19 +352,25 @@ async def scrape_ids(browser, ids: list[int]) -> None:
         await asyncio.gather(*(scrape_one(browser, pid, sem) for pid in ids))
         return
 
-    batch_no = 0
+    # Continuous worker pool: each worker grabs the next id as soon as it is
+    # free, so one slow tab no longer holds up the whole batch.
+    def id_stream():
+        batch_no = 0
+        while True:
+            batch = ids_for_batch(
+                settings.startid,
+                settings.concurrency_up,
+                settings.concurrency_down,
+                batch_no,
+            )
+            print(f"[MAIN] Scraping batch {batch_no + 1}: {batch}")
+            yield from batch
+            batch_no += 1
 
-    while True:
-        batch = ids_for_batch(
-            settings.startid,
-            settings.concurrency_up,
-            settings.concurrency_down,
-            batch_no,
-        )
+    stream = id_stream()
 
-        print(f"[MAIN] Scraping batch {batch_no + 1}: {batch}")
+    async def worker() -> None:
+        for pid in stream:
+            await scrape_one(browser, pid, sem)
 
-        await asyncio.gather(*(scrape_one(browser, pid, sem) for pid in batch))
-
-        batch_no += 1
-        await asyncio.sleep(1)
+    await asyncio.gather(*(worker() for _ in range(total_concurrency)))
