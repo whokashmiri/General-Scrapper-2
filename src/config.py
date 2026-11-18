@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     comment_refresh_older_than_hours: int = 24
     comment_refresh_limit: int = 500
     comment_refresh_scroll_fallback: bool = True
+    comments_wait_ms: int = 3_000
 
     min_delay_ms: int = 600
     max_delay_ms: int = 1200
