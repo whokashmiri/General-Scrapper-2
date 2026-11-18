@@ -182,7 +182,7 @@ async def save_ad_if_new(ad: dict[str, Any]) -> dict[str, Any]:
 
     now = datetime.now(UTC)
 
-    col = get_db()["harajScrape"]
+    col = get_db()["GeneralHaraj"]
 
     result = await col.update_one(
         {"_id": post_id},
@@ -231,7 +231,7 @@ async def update_comments(post_id: str, comments_gql: dict[str, Any] | None):
     comments = normalize_comments(items)
     visible_comments_count = len([c for c in comments if c.get("status") == 1])
 
-    await get_db()["harajScrape"].update_one(
+    await get_db()["GeneralHaraj"].update_one(
         {"_id": post_id},
         {
             "$set": {
@@ -261,7 +261,7 @@ async def find_ads_for_comment_refresh(
     }
 
     cursor = (
-        get_db()["harajScrape"]
+        get_db()["GeneralHaraj"]
         .find(
             query,
             {
@@ -281,7 +281,7 @@ async def find_ads_for_comment_refresh(
 
 
 async def ensure_indexes():
-    col = get_db()["harajScrape"]
+    col = get_db()["GeneralHaraj"]
 
     await col.create_index("postId")
     await col.create_index("firstSeenAt")
@@ -294,7 +294,7 @@ async def ensure_indexes():
 
 
 async def count_ads_added_since(date: datetime) -> int:
-    return await get_db()["harajScrape"].count_documents(
+    return await get_db()["GeneralHaraj"].count_documents(
         {"firstSeenAt": {"$gte": date}}
     )
 
